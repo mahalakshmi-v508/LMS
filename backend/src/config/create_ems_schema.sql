@@ -1,0 +1,13 @@
+-- ======================================================================================
+-- NOTE: This project now runs on MySQL.
+--
+-- The SQL Server version of this file has been replaced by the complete, idempotent
+-- MySQL schema located at:
+--
+--     database/lms_mysql_schema.sql
+--
+-- Open that file in MySQL Workbench and execute it once. It creates the LMS database,
+-- every core LMS table, the EMS tables, and the seed data.
+--
+-- `src/config/migrate_ems.ts` also runs that same schema file programmatically.
+-- ======================================================================================
