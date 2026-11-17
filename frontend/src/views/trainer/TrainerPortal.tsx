@@ -22,6 +22,10 @@ export const TrainerPortal: React.FC = () => {
   const [attendanceRecords, setAttendanceRecords] = useState<Record<number, string>>({});
   const [assignments, setAssignments] = useState<any[]>([]);
   const [tests, setTests] = useState<any[]>([]);
+  const [assignmentSubmissions, setAssignmentSubmissions] = useState<Record<number, any[]>>({});
+  const [testSubmissions, setTestSubmissions] = useState<Record<number, any[]>>({});
+  const [assignmentGrades, setAssignmentGrades] = useState<Record<number, { marks: string; feedback: string }>>({});
+  const [testGrades, setTestGrades] = useState<Record<number, string>>({});
   const [announcements, setAnnouncements] = useState<any[]>([]);
   const [chatRoom, setChatRoom] = useState<any>(null);
   const [chatMessages, setChatMessages] = useState<any[]>([]);
@@ -85,6 +89,83 @@ export const TrainerPortal: React.FC = () => {
     }
   };
 
+  // Load student submissions for every assignment/test in the batch
+  const loadSubmissions = async (assignList: any[], testList: any[]) => {
+    const assignPairs = await Promise.all(
+      assignList.map(async (a) => {
+        const res = await api.getAssignmentSubmissions(a.id);
+        return [a.id, res.success && res.data ? res.data : []] as const;
+      })
+    );
+    const testPairs = await Promise.all(
+      testList.map(async (t) => {
+        const res = await api.getTestSubmissions(t.id);
+        return [t.id, res.success && res.data ? res.data : []] as const;
+      })
+    );
+
+    setAssignmentSubmissions(Object.fromEntries(assignPairs));
+    setTestSubmissions(Object.fromEntries(testPairs));
+
+    const assignDraft: Record<number, { marks: string; feedback: string }> = {};
+    for (const [, subs] of assignPairs) {
+      for (const sub of subs as any[]) {
+        assignDraft[sub.id] = {
+          marks: sub.marks_obtained !== null && sub.marks_obtained !== undefined ? String(sub.marks_obtained) : '',
+          feedback: sub.trainer_feedback || '',
+        };
+      }
+    }
+    setAssignmentGrades(assignDraft);
+
+    const testDraft: Record<number, string> = {};
+    for (const [, subs] of testPairs) {
+      for (const sub of subs as any[]) {
+        testDraft[sub.id] = sub.marks_obtained !== null && sub.marks_obtained !== undefined ? String(sub.marks_obtained) : '';
+      }
+    }
+    setTestGrades(testDraft);
+  };
+
+  const handleGradeAssignment = async (submissionId: number, assignmentId: number) => {
+    const draft = assignmentGrades[submissionId] || { marks: '', feedback: '' };
+    if (draft.marks.trim() === '') {
+      showNotice('Enter marks before saving.');
+      return;
+    }
+    const res = await api.gradeAssignmentSubmission(submissionId, {
+      marks_obtained: Number(draft.marks),
+      trainer_feedback: draft.feedback,
+    });
+    if (res.success) {
+      showNotice('Assignment marks saved!');
+      const refreshed = await api.getAssignmentSubmissions(assignmentId);
+      if (refreshed.success && refreshed.data) {
+        setAssignmentSubmissions((prev) => ({ ...prev, [assignmentId]: refreshed.data as any[] }));
+      }
+    } else {
+      showNotice(res.message || res.error || 'Unable to save marks.');
+    }
+  };
+
+  const handleGradeTest = async (submissionId: number, testId: number) => {
+    const marks = testGrades[submissionId];
+    if (marks === undefined || marks.trim() === '') {
+      showNotice('Enter marks before saving.');
+      return;
+    }
+    const res = await api.gradeTestSubmission(submissionId, Number(marks));
+    if (res.success) {
+      showNotice('Test marks saved!');
+      const refreshed = await api.getTestSubmissions(testId);
+      if (refreshed.success && refreshed.data) {
+        setTestSubmissions((prev) => ({ ...prev, [testId]: refreshed.data as any[] }));
+      }
+    } else {
+      showNotice(res.message || res.error || 'Unable to save marks.');
+    }
+  };
+
   const loadBatchData = async (batchId: number) => {
     try {
       const [lcRes, rRes, sRes, aRes, tRes, annRes, crRes] = await Promise.all([
@@ -108,8 +189,11 @@ export const TrainerPortal: React.FC = () => {
         });
         setAttendanceRecords(defaultAtt);
       }
-      if (aRes.success && aRes.data) setAssignments(aRes.data);
-      if (tRes.success && tRes.data) setTests(tRes.data);
+      const loadedAssignments = aRes.success && aRes.data ? aRes.data : [];
+      const loadedTests = tRes.success && tRes.data ? tRes.data : [];
+      if (aRes.success && aRes.data) setAssignments(loadedAssignments);
+      if (tRes.success && tRes.data) setTests(loadedTests);
+      loadSubmissions(loadedAssignments, loadedTests);
       if (annRes.success && annRes.data) setAnnouncements(annRes.data);
       if (crRes.success && crRes.data) {
         setChatRoom(crRes.data);
@@ -613,17 +697,115 @@ export const TrainerPortal: React.FC = () => {
             <h2 style={{ fontSize: '1.5rem', fontWeight: 800, marginBottom: '24px' }}>Day-Wise Assignments (§ 13)</h2>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: '24px' }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                {assignments.map((a) => (
-                  <div key={a.id} className="glass-card" style={{ padding: '20px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                      <div>
-                        <span className="badge badge-info">Due: {new Date(a.due_date).toLocaleDateString()}</span>
-                        <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginTop: '8px' }}>{a.title}</h3>
-                        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '4px' }}>{a.description}</p>
+                {assignments.map((a) => {
+                  const subs = assignmentSubmissions[a.id] || [];
+                  return (
+                    <div key={a.id} className="glass-card" style={{ padding: '20px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                        <div>
+                          <span className="badge badge-info">Due: {new Date(a.due_date).toLocaleDateString()}</span>
+                          <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginTop: '8px' }}>{a.title}</h3>
+                          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '4px' }}>{a.description}</p>
+                        </div>
+                        <span className={`badge ${subs.length > 0 ? 'badge-success' : 'badge-secondary'}`} style={{ whiteSpace: 'nowrap' }}>
+                          {subs.length} submission{subs.length === 1 ? '' : 's'}
+                        </span>
+                      </div>
+
+                      <div style={{ marginTop: '14px', borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                        <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '8px', letterSpacing: '0.04em' }}>
+                          STUDENT SUBMISSIONS
+                        </div>
+                        {subs.length === 0 ? (
+                          <div style={{ fontSize: '0.82rem', color: 'var(--text-dim)' }}>
+                            No student has submitted this task yet.
+                          </div>
+                        ) : (
+                          <div className="table-container">
+                            <table className="data-table">
+                              <thead>
+                                <tr>
+                                  <th>Student</th>
+                                  <th>Submitted</th>
+                                  <th>Work</th>
+                                  <th>Marks</th>
+                                  <th>Feedback</th>
+                                  <th></th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {subs.map((sub: any) => {
+                                  const draft = assignmentGrades[sub.id] || { marks: '', feedback: '' };
+                                  return (
+                                    <tr key={sub.id}>
+                                      <td style={{ fontWeight: 600 }}>{sub.student_name}</td>
+                                      <td style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                                        {sub.submitted_at ? new Date(sub.submitted_at).toLocaleString() : '-'}
+                                      </td>
+                                      <td>
+                                        {sub.submission_file_url ? (
+                                          <a
+                                            href={sub.submission_file_url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            style={{ color: 'var(--primary)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                          >
+                                            Open <ExternalLink size={12} />
+                                          </a>
+                                        ) : '-'}
+                                      </td>
+                                      <td>
+                                        <input
+                                          className="form-input"
+                                          style={{ width: '80px' }}
+                                          type="number"
+                                          min={0}
+                                          value={draft.marks}
+                                          placeholder="0"
+                                          onChange={(e) => setAssignmentGrades((prev) => ({
+                                            ...prev,
+                                            [sub.id]: {
+                                              ...(prev[sub.id] || { marks: '', feedback: '' }),
+                                              marks: e.target.value,
+                                            },
+                                          }))}
+                                        />
+                                      </td>
+                                      <td>
+                                        <input
+                                          className="form-input"
+                                          style={{ minWidth: '160px' }}
+                                          value={draft.feedback}
+                                          placeholder="Feedback..."
+                                          onChange={(e) => setAssignmentGrades((prev) => ({
+                                            ...prev,
+                                            [sub.id]: {
+                                              ...(prev[sub.id] || { marks: '', feedback: '' }),
+                                              feedback: e.target.value,
+                                            },
+                                          }))}
+                                        />
+                                      </td>
+                                      <td>
+                                        <button
+                                          type="button"
+                                          className="btn btn-primary btn-sm"
+                                          onClick={() => handleGradeAssignment(sub.id, a.id)}
+                                        >
+                                          {sub.marks_obtained !== null && sub.marks_obtained !== undefined ? 'Update' : 'Save'}
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className="glass-card" style={{ padding: '24px', height: 'fit-content' }}>
@@ -669,15 +851,93 @@ export const TrainerPortal: React.FC = () => {
             <h2 style={{ fontSize: '1.5rem', fontWeight: 800, marginBottom: '24px' }}>Weekly Subject Test Papers (§ 14)</h2>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: '24px' }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                {tests.map((t) => (
-                  <div key={t.id} className="glass-card" style={{ padding: '20px' }}>
-                    <span className="badge badge-warning">Subject: {t.subject}</span>
-                    <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginTop: '8px' }}>{t.title}</h3>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      Total Marks: {t.total_marks}
+                {tests.map((t) => {
+                  const subs = testSubmissions[t.id] || [];
+                  return (
+                    <div key={t.id} className="glass-card" style={{ padding: '20px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                        <div>
+                          <span className="badge badge-warning">Subject: {t.subject}</span>
+                          <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginTop: '8px' }}>{t.title}</h3>
+                          <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                            Total Marks: {t.total_marks}
+                          </div>
+                        </div>
+                        <span className={`badge ${subs.length > 0 ? 'badge-success' : 'badge-secondary'}`} style={{ whiteSpace: 'nowrap' }}>
+                          {subs.length} answer sheet{subs.length === 1 ? '' : 's'}
+                        </span>
+                      </div>
+
+                      <div style={{ marginTop: '14px', borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                        <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '8px', letterSpacing: '0.04em' }}>
+                          STUDENT ANSWER SHEETS
+                        </div>
+                        {subs.length === 0 ? (
+                          <div style={{ fontSize: '0.82rem', color: 'var(--text-dim)' }}>
+                            No student has submitted this test yet.
+                          </div>
+                        ) : (
+                          <div className="table-container">
+                            <table className="data-table">
+                              <thead>
+                                <tr>
+                                  <th>Student</th>
+                                  <th>Submitted</th>
+                                  <th>Answer Sheet</th>
+                                  <th>Marks ({t.total_marks})</th>
+                                  <th></th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {subs.map((sub: any) => (
+                                  <tr key={sub.id}>
+                                    <td style={{ fontWeight: 600 }}>{sub.student_name}</td>
+                                    <td style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                                      {sub.submitted_at ? new Date(sub.submitted_at).toLocaleString() : '-'}
+                                    </td>
+                                    <td>
+                                      {sub.answer_sheet_url ? (
+                                        <a
+                                          href={sub.answer_sheet_url}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          style={{ color: 'var(--primary)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                        >
+                                          Open <ExternalLink size={12} />
+                                        </a>
+                                      ) : '-'}
+                                    </td>
+                                    <td>
+                                      <input
+                                        className="form-input"
+                                        style={{ width: '90px' }}
+                                        type="number"
+                                        min={0}
+                                        max={t.total_marks}
+                                        value={testGrades[sub.id] ?? ''}
+                                        placeholder="0"
+                                        onChange={(e) => setTestGrades((prev) => ({ ...prev, [sub.id]: e.target.value }))}
+                                      />
+                                    </td>
+                                    <td>
+                                      <button
+                                        type="button"
+                                        className="btn btn-primary btn-sm"
+                                        onClick={() => handleGradeTest(sub.id, t.id)}
+                                      >
+                                        {sub.marks_obtained !== null && sub.marks_obtained !== undefined ? 'Update' : 'Save'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               <div className="glass-card" style={{ padding: '24px', height: 'fit-content' }}>

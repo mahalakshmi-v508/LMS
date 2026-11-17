@@ -1,8 +1,10 @@
 // src/views/admin/AdminPortal.tsx
 import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../../services/api';
+import { CertificatePreview } from '../../components/CertificatePreview';
 import {
-  Users, UserCheck, BookOpen, Layers, Plus, Calendar, Video, FileText, CheckCircle2, Briefcase
+  Users, UserCheck, BookOpen, Layers, Plus, Calendar, Video, FileText, CheckCircle2, Briefcase,
+  Eye, Pencil, X, Download
 } from 'lucide-react';
 import { EmsPortal } from '../ems/EmsPortal';
 
@@ -56,6 +58,16 @@ export const AdminPortal: React.FC = () => {
   const [courseCompletionConfirmed, setCourseCompletionConfirmed] = useState(false);
   const [issuingCertificate, setIssuingCertificate] = useState(false);
   const [issuedCertificateId, setIssuedCertificateId] = useState<number | null>(null);
+  const [previewCertificate, setPreviewCertificate] = useState<any>(null);
+  const [editingCertificate, setEditingCertificate] = useState<any>(null);
+  const [savingCertificate, setSavingCertificate] = useState(false);
+  const [certForm, setCertForm] = useState({
+    certificate_number: '',
+    recipient_name: '',
+    course_title: '',
+    batch_label: '',
+    issued_at: '',
+  });
   const [managedBatchId, setManagedBatchId] = useState<number | null>(null);
   const [managedBatchStudents, setManagedBatchStudents] = useState<any[]>([]);
   const [batchStudentIds, setBatchStudentIds] = useState<number[]>([]);
@@ -173,6 +185,49 @@ export const AdminPortal: React.FC = () => {
     setStudentEditCertification('CERTIFIED');
     showNotice(`Certificate ${res.data.certificate_number} issued (${res.data.attendance_percentage}% attendance).`);
     await loadAdminStudents(true);
+    if (selectedStudent) {
+      const refreshed = await api.getStudentAdminDetails(selectedStudent.student_id);
+      if (refreshed.success && refreshed.data) setStudentDetails(refreshed.data);
+    }
+  };
+
+  const openCertificateEditor = (cert: any) => {
+    const issued = cert.issued_at ? new Date(cert.issued_at) : null;
+    const localDate = issued && !Number.isNaN(issued.getTime())
+      ? `${issued.getFullYear()}-${String(issued.getMonth() + 1).padStart(2, '0')}-${String(issued.getDate()).padStart(2, '0')}`
+      : '';
+    setEditingCertificate(cert);
+    setCertForm({
+      certificate_number: cert.certificate_number || '',
+      recipient_name: cert.recipient_name || cert.default_recipient_name || '',
+      course_title: cert.course_title || cert.default_course_title || '',
+      batch_label: cert.batch_label || cert.default_batch_label || '',
+      issued_at: localDate,
+    });
+  };
+
+  const handleSaveCertificate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingCertificate) return;
+    setSavingCertificate(true);
+    const res = await api.updateCertificate(editingCertificate.id, {
+      certificate_number: certForm.certificate_number,
+      recipient_name: certForm.recipient_name,
+      course_title: certForm.course_title,
+      batch_label: certForm.batch_label,
+      issued_at: certForm.issued_at || undefined,
+    });
+    setSavingCertificate(false);
+    if (!res.success) {
+      showNotice(`Certificate update failed: ${res.message || res.error || 'Request failed'}`);
+      return;
+    }
+    showNotice(`Certificate ${certForm.certificate_number} updated and PDF regenerated.`);
+    setEditingCertificate(null);
+    if (selectedStudent) {
+      const refreshed = await api.getStudentAdminDetails(selectedStudent.student_id);
+      if (refreshed.success && refreshed.data) setStudentDetails(refreshed.data);
+    }
   };
 
   const handleUpdateStudent = async (e: React.FormEvent) => {
@@ -714,6 +769,46 @@ export const AdminPortal: React.FC = () => {
 
                 <div style={{ marginTop: '24px', padding: '16px', border: '1px solid var(--border-subtle)', borderRadius: '10px' }}>
                   <h4 style={{ marginBottom: '8px' }}>Course Certificate</h4>
+
+                  {studentDetails?.certificates?.length > 0 && (
+                    <div style={{ display: 'grid', gap: '8px', marginBottom: '16px' }}>
+                      {studentDetails.certificates.map((cert: any) => (
+                        <div
+                          key={cert.id}
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: '10px',
+                            flexWrap: 'wrap',
+                            padding: '10px 12px',
+                            borderRadius: '8px',
+                            background: 'var(--success-bg)',
+                            border: '1px solid rgba(16, 185, 129, 0.3)',
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>{cert.certificate_number}</div>
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                              {cert.course_title} • {cert.batch_label} • Issued {new Date(cert.issued_at).toLocaleDateString()}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: '6px' }}>
+                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => setPreviewCertificate(cert)}>
+                              <Eye size={14} /> View
+                            </button>
+                            <button type="button" className="btn btn-secondary btn-sm" onClick={() => openCertificateEditor(cert)}>
+                              <Pencil size={14} /> Edit
+                            </button>
+                            <a className="btn btn-secondary btn-sm" href={api.certificateDownloadUrl(cert.id)}>
+                              <Download size={14} /> PDF
+                            </a>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '12px' }}>
                     Issuing checks the student has at least 75% attendance in the assigned batch. Confirm course completion before issuing.
                   </p>
@@ -1109,6 +1204,174 @@ export const AdminPortal: React.FC = () => {
         {/* Tab 7: Employee Management System (EMS) */}
         {activeTab === 'ems' && <EmsPortal />}
       </main>
+
+      {/* Certificate preview modal */}
+      {previewCertificate && (
+        <div
+          onClick={() => setPreviewCertificate(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(2, 6, 23, 0.78)',
+            zIndex: 1000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '24px',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="glass-card"
+            style={{
+              width: 'min(1000px, 100%)',
+              maxHeight: '92vh',
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+              padding: 0,
+            }}
+          >
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: '12px',
+              flexWrap: 'wrap',
+              padding: '14px 20px',
+              borderBottom: '1px solid var(--border-subtle)',
+            }}>
+              <div>
+                <div style={{ fontWeight: 800 }}>Certificate #{previewCertificate.certificate_number}</div>
+                <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                  {previewCertificate.recipient_name} • {previewCertificate.course_title} • {previewCertificate.batch_label}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <a
+                  href={`${api.certificateViewUrl(previewCertificate.id)}#view=FitH`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn btn-secondary"
+                >
+                  <Eye size={16} /> Open PDF
+                </a>
+                <a href={api.certificateDownloadUrl(previewCertificate.id)} className="btn btn-primary">
+                  <Download size={16} /> Download
+                </a>
+                <button type="button" className="btn btn-secondary" onClick={() => setPreviewCertificate(null)}>
+                  <X size={16} /> Close
+                </button>
+              </div>
+            </div>
+            <div style={{
+              padding: '16px',
+              background: '#0b1120',
+              display: 'flex',
+              justifyContent: 'center',
+              overflow: 'hidden',
+            }}>
+              <div style={{ width: 'min(100%, calc((92vh - 130px) * 1.414))' }}>
+                <CertificatePreview certificate={previewCertificate} />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Certificate edit modal */}
+      {editingCertificate && (
+        <div
+          onClick={() => setEditingCertificate(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(2, 6, 23, 0.78)',
+            zIndex: 1000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '24px',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="glass-card"
+            style={{ width: 'min(560px, 100%)', maxHeight: '88vh', overflowY: 'auto', padding: '24px' }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+              <h3 style={{ fontSize: '1.15rem', fontWeight: 800 }}>Edit Certificate</h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setEditingCertificate(null)}>
+                <X size={14} /> Close
+              </button>
+            </div>
+            <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', marginBottom: '18px' }}>
+              These details are printed on the certificate. Saving regenerates the PDF. Leave a field empty to fall back to the student's real data.
+            </p>
+
+            <form onSubmit={handleSaveCertificate}>
+              <div className="form-group">
+                <label className="form-label">Certificate Number</label>
+                <input
+                  className="form-input"
+                  value={certForm.certificate_number}
+                  onChange={(e) => setCertForm({ ...certForm, certificate_number: e.target.value })}
+                  required
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Student Name (printed)</label>
+                <input
+                  className="form-input"
+                  value={certForm.recipient_name}
+                  placeholder={editingCertificate.default_recipient_name}
+                  onChange={(e) => setCertForm({ ...certForm, recipient_name: e.target.value })}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Course Title (printed)</label>
+                <input
+                  className="form-input"
+                  value={certForm.course_title}
+                  placeholder={editingCertificate.default_course_title}
+                  onChange={(e) => setCertForm({ ...certForm, course_title: e.target.value })}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Batch Label (printed)</label>
+                <input
+                  className="form-input"
+                  value={certForm.batch_label}
+                  placeholder={editingCertificate.default_batch_label}
+                  onChange={(e) => setCertForm({ ...certForm, batch_label: e.target.value })}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Issue Date</label>
+                <input
+                  type="date"
+                  className="form-input"
+                  value={certForm.issued_at}
+                  onChange={(e) => setCertForm({ ...certForm, issued_at: e.target.value })}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+                <button type="submit" className="btn btn-primary" disabled={savingCertificate}>
+                  {savingCertificate ? 'Saving...' : 'Save & Regenerate PDF'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setPreviewCertificate(editingCertificate)}
+                >
+                  <Eye size={16} /> Preview
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

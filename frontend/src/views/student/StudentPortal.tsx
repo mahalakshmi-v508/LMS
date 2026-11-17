@@ -2,9 +2,10 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { CertificatePreview } from '../../components/CertificatePreview';
 import {
   Video, Calendar, FileText, Award, Bell, CheckCircle2, ExternalLink,
-  BookOpen, MessageSquare, CheckSquare, Clock, Send, Download
+  BookOpen, MessageSquare, CheckSquare, Clock, Send, Download, Eye, X
 } from 'lucide-react';
 
 export const StudentPortal: React.FC = () => {
@@ -16,8 +17,11 @@ export const StudentPortal: React.FC = () => {
   const [recordings, setRecordings] = useState<any[]>([]);
   const [assignments, setAssignments] = useState<any[]>([]);
   const [tests, setTests] = useState<any[]>([]);
+  const [myAssignmentSubmissions, setMyAssignmentSubmissions] = useState<Record<number, any>>({});
+  const [myTestSubmissions, setMyTestSubmissions] = useState<Record<number, any>>({});
   const [announcements, setAnnouncements] = useState<any[]>([]);
   const [certificates, setCertificates] = useState<any[]>([]);
+  const [previewCertificate, setPreviewCertificate] = useState<any>(null);
 
   // Attendance stats
   const [attendanceData, setAttendanceData] = useState<any>(null);
@@ -109,29 +113,64 @@ export const StudentPortal: React.FC = () => {
       api.getStudentCertificates(studentId).then((res) => {
         if (res.success && res.data) setCertificates(res.data);
       });
+      loadMySubmissions(studentId);
     }
   }, [user?.student_id]);
 
+  // Load this student's own submissions (assignments + tests) so marks/feedback are visible
+  const loadMySubmissions = async (studentId: number) => {
+    const res = await api.getStudentSubmissions(studentId);
+    if (!res.success || !res.data) return;
+    const assignMap: Record<number, any> = {};
+    for (const sub of res.data.assignments) assignMap[sub.assignment_id] = sub;
+    setMyAssignmentSubmissions(assignMap);
+    const testMap: Record<number, any> = {};
+    for (const sub of res.data.tests) testMap[sub.test_id] = sub;
+    setMyTestSubmissions(testMap);
+  };
+
   const handleSubmitAssignment = async (assignmentId: number) => {
     const studentId = user?.student_id || 2;
-    const url = window.prompt('Paste your submission file URL (e.g. GitHub repo or Google Drive link):');
+    const existing = myAssignmentSubmissions[assignmentId];
+    const url = window.prompt(
+      existing
+        ? 'Update your submission URL (new link will replace the old one):'
+        : 'Paste your submission file URL (e.g. GitHub repo or Google Drive link):',
+      existing?.submission_file_url || '',
+    );
     if (!url) return;
     const res = await api.submitAssignment(assignmentId, {
       student_id: studentId,
       submission_file_url: url,
     });
-    showNotice(res.success ? 'Assignment submitted successfully!' : (res.message || res.error || 'Submit failed'));
+    if (res.success) {
+      showNotice(existing ? 'Submission updated! Trainer will review it again.' : 'Assignment submitted successfully! ✅');
+      await loadMySubmissions(studentId);
+    } else {
+      showNotice(res.message || res.error || 'Submit failed');
+    }
   };
 
   const handleSubmitTest = async (testId: number) => {
     const studentId = user?.student_id || 2;
-    const url = window.prompt('Paste your answer sheet URL:');
+    const existing = myTestSubmissions[testId];
+    const url = window.prompt(
+      existing
+        ? 'Update your answer sheet URL (new link will replace the old one):'
+        : 'Paste your answer sheet URL:',
+      existing?.answer_sheet_url || '',
+    );
     if (!url) return;
     const res = await api.submitTest(testId, {
       student_id: studentId,
       answer_sheet_url: url,
     });
-    showNotice(res.success ? 'Test answer sheet submitted successfully!' : (res.message || res.error || 'Submit failed'));
+    if (res.success) {
+      showNotice(existing ? 'Answer sheet updated! Trainer will review it again.' : 'Test answer sheet submitted successfully! ✅');
+      await loadMySubmissions(studentId);
+    } else {
+      showNotice(res.message || res.error || 'Submit failed');
+    }
   };
 
   const handleSendChatMessage = async (e: React.FormEvent) => {
@@ -496,23 +535,70 @@ export const StudentPortal: React.FC = () => {
           <div>
             <h2 style={{ fontSize: '1.5rem', fontWeight: 800, marginBottom: '24px' }}>Batch Assignments (§ 13)</h2>
             <div style={{ display: 'grid', gap: '16px' }}>
-              {assignments.map((item) => (
-                <div key={item.id} className="glass-card" style={{ padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <span className="badge badge-info" style={{ marginBottom: '8px' }}>Due: {new Date(item.due_date).toLocaleDateString()}</span>
-                    <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginTop: '4px' }}>{item.title}</h3>
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '4px' }}>{item.description}</p>
-                    {item.file_attachment_url && (
-                      <a href={item.file_attachment_url} target="_blank" rel="noreferrer" style={{ fontSize: '0.8rem', color: 'var(--primary)', display: 'inline-block', marginTop: '6px' }}>
-                        📎 Download Assignment Brief
-                      </a>
-                    )}
+              {assignments.map((item) => {
+                const sub = myAssignmentSubmissions[item.id];
+                const graded = sub && sub.marks_obtained !== null && sub.marks_obtained !== undefined;
+                return (
+                  <div key={item.id} className="glass-card" style={{ padding: '20px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px' }}>
+                      <div style={{ flex: 1 }}>
+                        <span className="badge badge-info" style={{ marginBottom: '8px' }}>Due: {new Date(item.due_date).toLocaleDateString()}</span>
+                        <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginTop: '4px' }}>{item.title}</h3>
+                        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '4px' }}>{item.description}</p>
+                        {item.file_attachment_url && (
+                          <a href={item.file_attachment_url} target="_blank" rel="noreferrer" style={{ fontSize: '0.8rem', color: 'var(--primary)', display: 'inline-block', marginTop: '6px' }}>
+                            📎 Download Assignment Brief
+                          </a>
+                        )}
+
+                        {sub ? (
+                          <div style={{
+                            marginTop: '12px',
+                            padding: '12px 14px',
+                            borderRadius: '10px',
+                            background: graded ? 'var(--success-bg)' : 'rgba(99, 102, 241, 0.10)',
+                            border: `1px solid ${graded ? 'rgba(16, 185, 129, 0.3)' : 'rgba(99, 102, 241, 0.3)'}`,
+                          }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, color: graded ? '#34D399' : '#A5B4FC' }}>
+                              <CheckCircle2 size={16} />
+                              {graded
+                                ? `Submitted & Graded — ${sub.marks_obtained} marks`
+                                : 'Submitted — waiting for trainer to review'}
+                            </div>
+                            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                              Sent on {new Date(sub.submitted_at).toLocaleString()}
+                            </div>
+                            <a
+                              href={sub.submission_file_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ fontSize: '0.8rem', color: 'var(--primary)', display: 'inline-block', marginTop: '6px' }}
+                            >
+                              View your submitted work ↗
+                            </a>
+                            {graded && sub.trainer_feedback && (
+                              <div style={{ marginTop: '8px', fontSize: '0.82rem', color: 'var(--text-main)' }}>
+                                <strong>Trainer feedback:</strong> {sub.trainer_feedback}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div style={{ marginTop: '10px', fontSize: '0.8rem', color: 'var(--text-dim)' }}>
+                            Not submitted yet.
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        className={`btn ${sub ? 'btn-secondary' : 'btn-primary'}`}
+                        style={{ whiteSpace: 'nowrap' }}
+                        onClick={() => handleSubmitAssignment(item.id)}
+                      >
+                        {sub ? 'Update Submission' : 'Submit Solution'}
+                      </button>
+                    </div>
                   </div>
-                  <button className="btn btn-primary" onClick={() => handleSubmitAssignment(item.id)}>
-                    Submit Solution
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -522,20 +608,62 @@ export const StudentPortal: React.FC = () => {
           <div>
             <h2 style={{ fontSize: '1.5rem', fontWeight: 800, marginBottom: '24px' }}>Weekly Subject Tests (§ 14)</h2>
             <div style={{ display: 'grid', gap: '16px' }}>
-              {tests.map((t) => (
-                <div key={t.id} className="glass-card" style={{ padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <span className="badge badge-warning">{t.subject}</span>
-                    <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: '6px 0 4px' }}>{t.title}</h3>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                      Total Marks: {t.total_marks}
+              {tests.map((t) => {
+                const sub = myTestSubmissions[t.id];
+                const graded = sub && sub.marks_obtained !== null && sub.marks_obtained !== undefined;
+                return (
+                  <div key={t.id} className="glass-card" style={{ padding: '20px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px' }}>
+                      <div style={{ flex: 1 }}>
+                        <span className="badge badge-warning">{t.subject}</span>
+                        <h3 style={{ fontSize: '1.15rem', fontWeight: 700, margin: '6px 0 4px' }}>{t.title}</h3>
+                        <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                          Total Marks: {t.total_marks}
+                        </div>
+
+                        {sub ? (
+                          <div style={{
+                            marginTop: '12px',
+                            padding: '12px 14px',
+                            borderRadius: '10px',
+                            background: graded ? 'var(--success-bg)' : 'rgba(99, 102, 241, 0.10)',
+                            border: `1px solid ${graded ? 'rgba(16, 185, 129, 0.3)' : 'rgba(99, 102, 241, 0.3)'}`,
+                          }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, color: graded ? '#34D399' : '#A5B4FC' }}>
+                              <CheckCircle2 size={16} />
+                              {graded
+                                ? `Submitted & Graded — ${sub.marks_obtained} / ${t.total_marks} marks`
+                                : 'Submitted — waiting for trainer to review'}
+                            </div>
+                            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                              Sent on {new Date(sub.submitted_at).toLocaleString()}
+                            </div>
+                            <a
+                              href={sub.answer_sheet_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ fontSize: '0.8rem', color: 'var(--primary)', display: 'inline-block', marginTop: '6px' }}
+                            >
+                              View your answer sheet ↗
+                            </a>
+                          </div>
+                        ) : (
+                          <div style={{ marginTop: '10px', fontSize: '0.8rem', color: 'var(--text-dim)' }}>
+                            Not submitted yet.
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        className={`btn ${sub ? 'btn-secondary' : 'btn-primary'}`}
+                        style={{ whiteSpace: 'nowrap' }}
+                        onClick={() => handleSubmitTest(t.id)}
+                      >
+                        {sub ? 'Update Answer Sheet' : 'Submit Answer Sheet'}
+                      </button>
                     </div>
                   </div>
-                  <button className="btn btn-primary" onClick={() => handleSubmitTest(t.id)}>
-                    Submit Answer Sheet
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -642,14 +770,22 @@ export const StudentPortal: React.FC = () => {
                         Certificate #{cert.certificate_number}
                       </h3>
                       <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                        {cert.course_title || cert.course_name} • Batch {cert.batch_label || cert.batch_code}
+                      </div>
+                      <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                         Issued on: {new Date(cert.issued_at).toLocaleDateString()}
                       </div>
                     </div>
-                    {cert.pdf_url && cert.id && (
-                      <a href={api.certificateDownloadUrl(cert.id)} className="btn btn-primary">
-                        <Download size={16} /> Download Certificate PDF
-                      </a>
-                    )}
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      <button className="btn btn-secondary" onClick={() => setPreviewCertificate(cert)}>
+                        <Eye size={16} /> View
+                      </button>
+                      {cert.pdf_url && cert.id && (
+                        <a href={api.certificateDownloadUrl(cert.id)} className="btn btn-primary">
+                          <Download size={16} /> Download PDF
+                        </a>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -657,6 +793,80 @@ export const StudentPortal: React.FC = () => {
           </div>
         )}
       </main>
+
+      {/* Certificate preview modal */}
+      {previewCertificate && (
+        <div
+          onClick={() => setPreviewCertificate(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(2, 6, 23, 0.78)',
+            zIndex: 1000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '24px',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="glass-card"
+            style={{
+              width: 'min(1000px, 100%)',
+              maxHeight: '92vh',
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+              padding: 0,
+            }}
+          >
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: '12px',
+              flexWrap: 'wrap',
+              padding: '14px 20px',
+              borderBottom: '1px solid var(--border-subtle)',
+            }}>
+              <div>
+                <div style={{ fontWeight: 800 }}>Certificate #{previewCertificate.certificate_number}</div>
+                <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                  {previewCertificate.course_title || previewCertificate.course_name} • Batch {previewCertificate.batch_label || previewCertificate.batch_code}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <a
+                  href={`${api.certificateViewUrl(previewCertificate.id)}#view=FitH`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn btn-secondary"
+                >
+                  <ExternalLink size={16} /> Open PDF
+                </a>
+                <a href={api.certificateDownloadUrl(previewCertificate.id)} className="btn btn-primary">
+                  <Download size={16} /> Download
+                </a>
+                <button className="btn btn-secondary" onClick={() => setPreviewCertificate(null)}>
+                  <X size={16} /> Close
+                </button>
+              </div>
+            </div>
+            <div style={{
+              padding: '16px',
+              background: '#0b1120',
+              display: 'flex',
+              justifyContent: 'center',
+              overflow: 'hidden',
+            }}>
+              <div style={{ width: 'min(100%, calc((92vh - 130px) * 1.414))' }}>
+                <CertificatePreview certificate={previewCertificate} />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import PDFDocument from 'pdfkit';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import emsRoutes from './src/routes/emsRoutes';
 import { poolPromise, sql } from './src/config/db';
@@ -62,6 +63,109 @@ const createCertificatePdf = (certificate: {
     document.end();
 });
 
+interface CertificateRow {
+    id: number;
+    certificate_number: string;
+    student_id: number;
+    batch_id: number;
+    issued_at: Date | string;
+    pdf_url: string | null;
+    recipient_name: string | null;
+    course_title: string | null;
+    batch_label: string | null;
+    student_name: string;
+    course_name: string;
+    batch_code: string;
+}
+
+const certificateSelect = `
+    SELECT cert.id, cert.certificate_number, cert.student_id, cert.batch_id, cert.issued_at, cert.pdf_url,
+           cert.recipient_name, cert.course_title, cert.batch_label,
+           u.name AS student_name, c.course_name, b.batch_code
+    FROM certificates cert
+    INNER JOIN students s ON cert.student_id = s.student_id
+    INNER JOIN users u ON s.user_id = u.id
+    INNER JOIN batches b ON cert.batch_id = b.id
+    INNER JOIN courses c ON b.course_id = c.id
+`;
+
+// The PDF shows the editable values when set, otherwise the student's real data.
+const resolveCertificateText = (row: CertificateRow) => ({
+    recipientName: (row.recipient_name || '').trim() || row.student_name,
+    courseTitle: (row.course_title || '').trim() || row.course_name,
+    batchLabel: (row.batch_label || '').trim() || row.batch_code,
+});
+
+const certificateResponse = (row: CertificateRow) => {
+    const text = resolveCertificateText(row);
+    const issuedAt = row.issued_at instanceof Date ? row.issued_at : new Date(row.issued_at);
+    return {
+        id: row.id,
+        certificate_number: row.certificate_number,
+        student_id: row.student_id,
+        batch_id: row.batch_id,
+        issued_at: issuedAt,
+        pdf_url: row.pdf_url,
+        recipient_name: text.recipientName,
+        course_title: text.courseTitle,
+        batch_label: text.batchLabel,
+        default_recipient_name: row.student_name,
+        default_course_title: row.course_name,
+        default_batch_label: row.batch_code,
+    };
+};
+
+const loadCertificateById = async (pool: Awaited<typeof poolPromise>, certificateId: number): Promise<CertificateRow | null> => {
+    const result = await pool.request()
+        .input('id', sql.Int, certificateId)
+        .query(`${certificateSelect} WHERE cert.id = @id`);
+    return result.recordset.length > 0 ? (result.recordset[0] as CertificateRow) : null;
+};
+
+// (Re)writes certificate-<id>.pdf from whatever is stored in the database.
+const writeCertificatePdf = async (row: CertificateRow): Promise<string> => {
+    const text = resolveCertificateText(row);
+    const issuedAt = row.issued_at instanceof Date ? row.issued_at : new Date(row.issued_at);
+    const pdf = await createCertificatePdf({
+        certificateNumber: row.certificate_number,
+        studentName: text.recipientName,
+        courseName: text.courseTitle,
+        batchCode: text.batchLabel,
+        issuedAt,
+    });
+    await mkdir(certificateDirectory, { recursive: true });
+    await writeFile(path.join(certificateDirectory, `certificate-${row.id}.pdf`), pdf);
+    return `/api/certificates/${row.id}/download`;
+};
+
+const sendCertificatePdf = async (
+    res: Response,
+    row: CertificateRow,
+    disposition: 'inline' | 'attachment',
+    pool: Awaited<typeof poolPromise>,
+) => {
+    const filePath = path.join(certificateDirectory, `certificate-${row.id}.pdf`);
+    // Older rows may point at a PDF that was never written - rebuild it on demand.
+    if (!existsSync(filePath)) {
+        const pdfUrl = await writeCertificatePdf(row);
+        if (row.pdf_url !== pdfUrl) {
+            await pool.request()
+                .input('certificate_id', sql.Int, row.id)
+                .input('pdf_url', sql.NVarChar(500), pdfUrl)
+                .query('UPDATE certificates SET pdf_url = @pdf_url WHERE id = @certificate_id');
+        }
+    }
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${disposition}; filename="${row.certificate_number}.pdf"`);
+    res.sendFile(filePath, (error) => {
+        if (error && !res.headersSent) {
+            res.status(404).json({ success: false, message: 'Certificate PDF file is unavailable' });
+        }
+    });
+};
+
+// Download (attachment) - used by the "Download PDF" buttons
 app.get('/api/certificates/:id/download', async (req, res) => {
     const certificateId = Number(req.params.id);
     if (!Number.isInteger(certificateId) || certificateId <= 0) {
@@ -71,21 +175,54 @@ app.get('/api/certificates/:id/download', async (req, res) => {
 
     try {
         const pool = await poolPromise;
-        const certificate = await pool.request()
-            .input('id', sql.Int, certificateId)
-            .query('SELECT id, certificate_number, pdf_url FROM certificates WHERE id = @id');
-
-        if (certificate.recordset.length === 0 || !certificate.recordset[0].pdf_url) {
+        const row = await loadCertificateById(pool, certificateId);
+        if (!row) {
             res.status(404).json({ success: false, message: 'Certificate PDF not found' });
             return;
         }
+        await sendCertificatePdf(res, row, 'attachment', pool);
+    } catch (err: any) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
 
-        const filePath = path.join(certificateDirectory, `certificate-${certificateId}.pdf`);
-        res.download(filePath, `${certificate.recordset[0].certificate_number}.pdf`, (error) => {
-            if (error && !res.headersSent) {
-                res.status(404).json({ success: false, message: 'Certificate PDF file is unavailable' });
-            }
-        });
+// View (inline) - used by the in-app preview modal / new tab
+app.get('/api/certificates/:id/view', async (req, res) => {
+    const certificateId = Number(req.params.id);
+    if (!Number.isInteger(certificateId) || certificateId <= 0) {
+        res.status(400).json({ success: false, message: 'Invalid certificate ID' });
+        return;
+    }
+
+    try {
+        const pool = await poolPromise;
+        const row = await loadCertificateById(pool, certificateId);
+        if (!row) {
+            res.status(404).json({ success: false, message: 'Certificate PDF not found' });
+            return;
+        }
+        await sendCertificatePdf(res, row, 'inline', pool);
+    } catch (err: any) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Certificate details (used to prefill the edit form)
+app.get('/api/certificates/:id', async (req, res) => {
+    const certificateId = Number(req.params.id);
+    if (!Number.isInteger(certificateId) || certificateId <= 0) {
+        res.status(400).json({ success: false, message: 'Invalid certificate ID' });
+        return;
+    }
+
+    try {
+        const pool = await poolPromise;
+        const row = await loadCertificateById(pool, certificateId);
+        if (!row) {
+            res.status(404).json({ success: false, message: 'Certificate not found' });
+            return;
+        }
+        res.json({ success: true, data: certificateResponse(row) });
     } catch (err: any) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -383,6 +520,9 @@ app.get('/api/students/:id/admin-details', async (req, res) => {
                 WHERE bs.student_id = @student_id
                 ORDER BY t.start_time DESC
             `);
+        const certificates = await pool.request()
+            .input('student_id', sql.Int, req.params.id)
+            .query(`${certificateSelect} WHERE cert.student_id = @student_id ORDER BY cert.issued_at DESC`);
 
         res.json({
             success: true,
@@ -390,7 +530,8 @@ app.get('/api/students/:id/admin-details', async (req, res) => {
                 profile: student.recordset[0],
                 attendance: attendance.recordset,
                 assignments: assignments.recordset,
-                tests: tests.recordset
+                tests: tests.recordset,
+                certificates: certificates.recordset.map((row: CertificateRow) => certificateResponse(row)),
             }
         });
     } catch (err: any) {
@@ -1410,16 +1551,27 @@ app.post('/api/assignments/:id/submit', async (req, res) => {
 
     try {
         const pool = await poolPromise;
-        const result = await pool.request()
+        await pool.request()
             .input('assignment_id', sql.Int, assignment_id)
             .input('student_id', sql.Int, student_id)
             .input('submission_file_url', sql.NVarChar(sql.MAX), submission_file_url)
             .query(`
                 INSERT INTO assignment_submissions (assignment_id, student_id, submission_file_url)
-                OUTPUT INSERTED.*
                 VALUES (@assignment_id, @student_id, @submission_file_url)
+                ON DUPLICATE KEY UPDATE
+                    submission_file_url = VALUES(submission_file_url),
+                    submitted_at = NOW(),
+                    marks_obtained = NULL,
+                    trainer_feedback = NULL
             `);
-        res.status(201).json({ success: true, data: result.recordset[0] });
+        const saved = await pool.request()
+            .input('assignment_id', sql.Int, assignment_id)
+            .input('student_id', sql.Int, student_id)
+            .query(`
+                SELECT * FROM assignment_submissions
+                WHERE assignment_id = @assignment_id AND student_id = @student_id
+            `);
+        res.status(201).json({ success: true, data: saved.recordset[0] });
     } catch (err: any) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -1532,16 +1684,26 @@ app.post('/api/tests/:id/submit', async (req, res) => {
 
     try {
         const pool = await poolPromise;
-        const result = await pool.request()
+        await pool.request()
             .input('test_id', sql.Int, test_id)
             .input('student_id', sql.Int, student_id)
             .input('answer_sheet_url', sql.NVarChar(sql.MAX), answer_sheet_url)
             .query(`
                 INSERT INTO test_submissions (test_id, student_id, answer_sheet_url)
-                OUTPUT INSERTED.*
                 VALUES (@test_id, @student_id, @answer_sheet_url)
+                ON DUPLICATE KEY UPDATE
+                    answer_sheet_url = VALUES(answer_sheet_url),
+                    submitted_at = NOW(),
+                    marks_obtained = NULL
             `);
-        res.status(201).json({ success: true, data: result.recordset[0] });
+        const saved = await pool.request()
+            .input('test_id', sql.Int, test_id)
+            .input('student_id', sql.Int, student_id)
+            .query(`
+                SELECT * FROM test_submissions
+                WHERE test_id = @test_id AND student_id = @student_id
+            `);
+        res.status(201).json({ success: true, data: saved.recordset[0] });
     } catch (err: any) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -1586,6 +1748,40 @@ app.put('/api/test-submissions/:id/grade', async (req, res) => {
             return res.status(404).json({ success: false, message: 'Test submission not found' });
         }
         res.json({ success: true, data: result.recordset[0] });
+    } catch (err: any) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Student View: My assignment + test submissions (with marks & feedback)
+app.get('/api/students/:id/submissions', async (req, res) => {
+    try {
+        const pool = await poolPromise;
+        const assignmentSubmissions = await pool.request()
+            .input('student_id', sql.Int, req.params.id)
+            .query(`
+                SELECT sub.*, a.title AS assignment_title, a.due_date, a.batch_id
+                FROM assignment_submissions sub
+                INNER JOIN assignments a ON sub.assignment_id = a.id
+                WHERE sub.student_id = @student_id
+                ORDER BY sub.submitted_at DESC
+            `);
+        const testSubmissions = await pool.request()
+            .input('student_id', sql.Int, req.params.id)
+            .query(`
+                SELECT ts.*, t.title AS test_title, t.subject, t.total_marks, t.batch_id
+                FROM test_submissions ts
+                INNER JOIN tests t ON ts.test_id = t.id
+                WHERE ts.student_id = @student_id
+                ORDER BY ts.submitted_at DESC
+            `);
+        res.json({
+            success: true,
+            data: {
+                assignments: assignmentSubmissions.recordset,
+                tests: testSubmissions.recordset,
+            },
+        });
     } catch (err: any) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -1911,6 +2107,101 @@ app.post('/api/certificates', async (req, res) => {
     }
 });
 
+// Edit Certificate (details + regenerate the PDF)
+app.put('/api/certificates/:id', async (req, res) => {
+    const certificateId = Number(req.params.id);
+    if (!Number.isInteger(certificateId) || certificateId <= 0) {
+        res.status(400).json({ success: false, message: 'Invalid certificate ID' });
+        return;
+    }
+
+    const { certificate_number, recipient_name, course_title, batch_label, issued_at } = req.body || {};
+
+    try {
+        const pool = await poolPromise;
+        const existing = await loadCertificateById(pool, certificateId);
+        if (!existing) {
+            res.status(404).json({ success: false, message: 'Certificate not found' });
+            return;
+        }
+
+        const update = pool.request().input('certificate_id', sql.Int, certificateId);
+        const fields: string[] = [];
+
+        if (certificate_number !== undefined) {
+            const value = String(certificate_number).trim();
+            if (!value) {
+                res.status(400).json({ success: false, message: 'Certificate number cannot be empty' });
+                return;
+            }
+            fields.push('certificate_number = @certificate_number');
+            update.input('certificate_number', sql.VarChar(100), value);
+        }
+        if (recipient_name !== undefined) {
+            fields.push('recipient_name = @recipient_name');
+            update.input('recipient_name', sql.VarChar(150), String(recipient_name || '').trim() || null);
+        }
+        if (course_title !== undefined) {
+            fields.push('course_title = @course_title');
+            update.input('course_title', sql.VarChar(200), String(course_title || '').trim() || null);
+        }
+        if (batch_label !== undefined) {
+            fields.push('batch_label = @batch_label');
+            update.input('batch_label', sql.VarChar(80), String(batch_label || '').trim() || null);
+        }
+        if (issued_at !== undefined) {
+            const raw = String(issued_at).trim();
+            let parsed = new Date(raw);
+            if (Number.isNaN(parsed.getTime())) {
+                res.status(400).json({ success: false, message: 'Invalid issue date' });
+                return;
+            }
+            // A date-only edit (from the form) keeps the original time of day.
+            if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+                const current = existing.issued_at instanceof Date ? existing.issued_at : new Date(existing.issued_at);
+                const [year, month, day] = raw.split('-').map(Number);
+                const sameDay = current.getFullYear() === year
+                    && current.getMonth() + 1 === month
+                    && current.getDate() === day;
+                parsed = sameDay
+                    ? new Date(year, month - 1, day, current.getHours(), current.getMinutes(), current.getSeconds())
+                    : new Date(year, month - 1, day, 9, 0, 0);
+            }
+            fields.push('issued_at = @issued_at');
+            update.input('issued_at', sql.DateTime2, parsed);
+        }
+
+        if (fields.length === 0) {
+            res.status(400).json({ success: false, message: 'Nothing to update' });
+            return;
+        }
+
+        await update.query(`UPDATE certificates SET ${fields.join(', ')} WHERE id = @certificate_id`);
+
+        const updated = await loadCertificateById(pool, certificateId);
+        if (!updated) {
+            res.status(404).json({ success: false, message: 'Certificate not found' });
+            return;
+        }
+
+        // Regenerate the PDF so the file matches the edited details.
+        const pdfUrl = await writeCertificatePdf(updated);
+        await pool.request()
+            .input('certificate_id', sql.Int, certificateId)
+            .input('pdf_url', sql.NVarChar(500), pdfUrl)
+            .query('UPDATE certificates SET pdf_url = @pdf_url WHERE id = @certificate_id');
+        updated.pdf_url = pdfUrl;
+
+        res.json({ success: true, data: certificateResponse(updated) });
+    } catch (err: any) {
+        if (String(err?.code || '').includes('ER_DUP_ENTRY')) {
+            res.status(400).json({ success: false, message: 'That certificate number is already used by another certificate' });
+            return;
+        }
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 // Get Student Certificates
 app.get('/api/students/:id/certificates', async (req, res) => {
     try {
@@ -1927,7 +2218,7 @@ app.get('/api/students/:id/certificates', async (req, res) => {
                 WHERE cert.student_id = @student_id
                 ORDER BY cert.issued_at DESC
             `);
-        res.json({ success: true, data: result.recordset });
+        res.json({ success: true, data: result.recordset.map((row: any) => certificateResponse(row as CertificateRow)) });
     } catch (err: any) {
         res.status(500).json({ success: false, error: err.message });
     }

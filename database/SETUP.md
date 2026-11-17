@@ -60,6 +60,39 @@ npx tsx src/config/migrate_ems.ts
 
 This executes the same `database/lms_mysql_schema.sql` file and prints the created tables.
 
+## 5. Optional: load full demo data for every screen
+
+To preview the whole app with realistic data (students, curriculum, live classes,
+recordings, attendance, assignments, tests, announcements, chat, certificates and
+the EMS module), run from the project root:
+
+```powershell
+node database/seed_demo_data.cjs
+```
+
+Notes:
+
+- The script is **idempotent** — running it again only inserts rows that are missing.
+- It reads the database settings from `backend/.env`.
+- Start the backend first if you also want it to generate real certificate PDFs
+  (it calls `POST /api/certificates` for the demo students).
+
+## 6. Upgrading an existing database (certificate editing)
+
+Newer builds let admins **preview and edit** a certificate (printed name, course
+title, batch label, issue date, certificate number). That needs three extra nullable
+columns on `certificates`. Existing databases can be upgraded with:
+
+```sql
+ALTER TABLE certificates
+  ADD COLUMN recipient_name VARCHAR(150) NULL AFTER issued_at,
+  ADD COLUMN course_title   VARCHAR(200) NULL AFTER recipient_name,
+  ADD COLUMN batch_label    VARCHAR(80)  NULL AFTER course_title;
+```
+
+The same columns are already part of `database/lms_mysql_schema.sql`, so fresh
+installs do not need this step.
+
 ## Notes
 
 - The backend uses `mysql2` together with a small compatibility layer

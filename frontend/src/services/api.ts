@@ -140,6 +140,8 @@ export const api = {
     request<any[]>(`/assignments/${assignment_id}/submissions`),
   gradeAssignmentSubmission: (submission_id: number, data: { marks_obtained: number; trainer_feedback?: string }) =>
     request(`/assignment-submissions/${submission_id}/grade`, { method: 'PUT', body: JSON.stringify(data) }),
+  getStudentSubmissions: (student_id: number) =>
+    request<{ assignments: any[]; tests: any[] }>(`/students/${student_id}/submissions`),
 
   // --- 8. TESTS & ASSESSMENTS ---
   getTests: (batch_id: number) => request<any[]>(`/batches/${batch_id}/tests`),
@@ -173,6 +175,33 @@ export const api = {
     ),
   certificateDownloadUrl: (certificate_id: number) =>
     `${API_BASE}/certificates/${certificate_id}/download`,
+  certificateViewUrl: (certificate_id: number) =>
+    `${API_BASE}/certificates/${certificate_id}/view`,
+  getCertificate: (certificate_id: number) =>
+    request<{
+      id: number;
+      certificate_number: string;
+      student_id: number;
+      batch_id: number;
+      issued_at: string;
+      pdf_url: string;
+      recipient_name: string;
+      course_title: string;
+      batch_label: string;
+      default_recipient_name: string;
+      default_course_title: string;
+      default_batch_label: string;
+    }>(`/certificates/${certificate_id}`),
+  updateCertificate: (
+    certificate_id: number,
+    data: {
+      certificate_number?: string;
+      recipient_name?: string;
+      course_title?: string;
+      batch_label?: string;
+      issued_at?: string;
+    }
+  ) => request(`/certificates/${certificate_id}`, { method: 'PUT', body: JSON.stringify(data) }),
   getStudentCertificates: (student_id: number) =>
     request<any[]>(`/students/${student_id}/certificates`),
 
